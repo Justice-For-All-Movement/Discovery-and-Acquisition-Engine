@@ -193,3 +193,57 @@ test("runtime limits strict enabled policy and provider failures fail without le
         e.code === "capture_unavailable" && !e.message.includes("secret"),
     );
 });
+
+test('late synchronous DNS result cannot start transport after the total deadline', async () => {
+  let calls = 0;
+  await assert.rejects(capture(c, 'https://archive.example/item', p, {
+    timeoutMs: 10,
+    resolve: async () => {
+      const until = performance.now() + 30;
+      while (performance.now() < until) { /* adversarial event-loop blockage */ }
+      return ['8.8.8.8'];
+    },
+    transport: async () => { calls++; return reply; },
+  }), { code: 'capture_timeout' });
+  assert.equal(calls, 0);
+});
+
+test('late synchronous transport result cannot publish bytes before delayed timer callback', async () => {
+  let signal: AbortSignal | undefined;
+  await assert.rejects(capture(c, 'https://archive.example/item', p, {
+    timeoutMs: 10, resolve: async () => ['8.8.8.8'],
+    transport: async (_url, options) => {
+      signal = options.signal;
+      const until = performance.now() + 30;
+      while (performance.now() < until) { /* timers cannot preempt synchronous code */ }
+      return reply;
+    },
+  }), { code: 'capture_timeout' });
+  assert.equal(signal?.aborted, true);
+});
+
+test('late response metadata work cannot publish a capture after dependency await completed', async () => {
+  let signal: AbortSignal | undefined;
+  const headers = { ...reply.headers } as Record<string, string | undefined>;
+  Object.defineProperty(headers, 'last-modified', { get: () => {
+    const until = performance.now() + 30;
+    while (performance.now() < until) { /* trusted adapter metadata can still consume time */ }
+    return 'synthetic timestamp';
+  } });
+  await assert.rejects(capture(c, 'https://archive.example/item', p, {
+    timeoutMs: 10, resolve: async () => ['8.8.8.8'],
+    transport: async (_url, options) => { signal = options.signal; return { ...reply, headers }; },
+  }), { code: 'capture_timeout' });
+  assert.equal(signal?.aborted, true);
+});
+
+test('late resolver rejection is classified as timeout without leaking provider diagnostics', async () => {
+  await assert.rejects(capture(c, 'https://archive.example/item', p, {
+    timeoutMs: 10,
+    resolve: async () => {
+      const until = performance.now() + 30;
+      while (performance.now() < until) { /* delay timer delivery before rejection */ }
+      throw new Error('private DNS diagnostics');
+    },
+  }), (error: unknown) => error instanceof DomainError && error.code === 'capture_timeout' && !error.message.includes('private'));
+});
