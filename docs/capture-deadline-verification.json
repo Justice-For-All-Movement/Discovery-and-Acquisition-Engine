@@ -1,0 +1,34 @@
+{
+  "unitId": "DAE-001",
+  "baseSha": "0d9a7410a0f9b382a9c7d60721e98649e161023b",
+  "scope": "Monotonic total-deadline acceptance fences for bounded HTTPS capture",
+  "reproducedBeforeFix": {
+    "command": "node --test tests/capture-boundary.test.ts",
+    "passed": 6,
+    "failed": 2,
+    "failures": [
+      "late synchronous DNS result cannot start transport after the total deadline: Missing expected rejection",
+      "late synchronous transport result cannot publish bytes before delayed timer callback: Missing expected rejection"
+    ]
+  },
+  "localVerificationAfterFix": {
+    "command": "node --test tests/capture-boundary.test.ts tests/capture.test.ts tests/pinned-https.test.ts",
+    "passed": 16,
+    "failed": 0,
+    "additionalCases": ["Late response metadata before publication", "Late resolver rejection with diagnostic redaction"],
+    "registryCommand": "node scripts/validate-pr-registry.mjs",
+    "registryResult": "pass"
+  },
+  "review": [
+    "Monotonic time is read from trusted node:perf_hooks, not an adapter clock or caller timestamp",
+    "No downstream request starts after a late DNS result",
+    "No bytes/provenance are published after a late dependency or response assembly",
+    "Owned abort signal propagates timeout; parent cancellation remains generic",
+    "Existing host, DNS, HTTPS certificate, byte-budget and redirect checks remain intact"
+  ],
+  "limits": [
+    "Full typecheck/build and dependency-backed suites require exact-head hosted CI; not claimed from local focused tests",
+    "No external source capture, credentials, deployment, paid resource or live acceptance",
+    "A monotonic acceptance fence cannot preempt synchronous adapter CPU or terminate native DNS"
+  ]
+}
