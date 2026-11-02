@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "repository": "neophilism/Discovery-and-Acquisition-Engine",
+  "kind": "unclassified",
+  "monitoring": {
+    "mode": "inventory"
+  },
+  "budget": {
+    "monthly_usd_max": 0,
+    "allow_billable_fallback": false
+  },
+  "failover": {
+    "mode": "disabled",
+    "stateful": false,
+    "writer_fencing": false,
+    "router": "none"
+  },
+  "deployments": []
+}
