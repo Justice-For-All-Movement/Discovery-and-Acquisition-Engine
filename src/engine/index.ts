@@ -897,7 +897,7 @@ export function createEngine(deps: DiscoveryDeps) {
   /** Enqueues refresh runs whose interval has elapsed and retry runs for failures that are due. Returns the runs created. */
   async function runDueWork(now: Date = new Date()): Promise<string[]> {
     const created: string[] = [];
-    const svc = (r: Rec, purpose: string): ServiceContext => ({ tenantId: r.tenant_id, projectId: r.project_id, purpose, requestId: randomUUID(), now: now.toISOString(), actor: { id: 'discovery-scheduler', kind: 'service', roles: [] }, capabilities: ['discovery:acquire'], compartments: r.compartment === null ? [] : [r.compartment] });
+    const svc = (r: Rec, purpose: string): ServiceContext => ({ tenantId: r.tenant_id, projectId: r.project_id, purpose, requestId: randomUUID(), now: new Date().toISOString(), actor: { id: 'discovery-scheduler', kind: 'service', roles: [] }, capabilities: ['discovery:acquire'], compartments: r.compartment === null ? [] : [r.compartment] });
     const active = `not exists (select 1 from ${S}.runs r where r.source_id=s.id and r.state in ('queued','running','paused'))`;
     for (const s of await sql.query(`select s.* from ${S}.sources s where not s.blocked and s.refresh_policy->>'mode'='interval' and s.next_refresh_at <= $1 and ${active} limit 50`, [now.toISOString()])) {
       const hasBytes = await one(sql, `select 1 from ${S}.acquisitions where source_id=$1 and level='bytes' limit 1`, [s.id]);

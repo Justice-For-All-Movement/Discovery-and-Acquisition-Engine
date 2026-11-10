@@ -82,6 +82,7 @@ export async function startFixture(): Promise<Fixture> {
     }
     if (p === '/docs/mirror-of-one.html') return html(res, articlePage('Harbour ledger shows untendered extension — syndicated', 'Coastal Mirror Network'));
     if (p === '/docs/two.html') return send(res, 200, 'text/html', gzipSync(articlePage('Budget meeting postponed', 'Example Gazette', 'The council postponed its budget meeting to the following month after the clerk reported that the printed papers had not arrived from the supplier in time for members to read them. '.repeat(4))), { 'content-encoding': 'gzip', etag: '"two"' });
+    if (p === '/files/report.pdf' && req.headers['if-none-match'] === '"pdf1"') { res.writeHead(304, { etag: '"pdf1"' }); return void res.end(); }
     if (p === '/files/report.pdf') return send(res, 200, 'application/octet-stream', PDF, { 'content-disposition': 'attachment; filename="annual report.pdf"', etag: '"pdf1"' });
     if (p === '/docs/missing.html') return send(res, 404, 'text/html', '<html><body>gone</body></html>');
     if (p === '/docs/error.html') return send(res, 500, 'text/plain', 'boom');
