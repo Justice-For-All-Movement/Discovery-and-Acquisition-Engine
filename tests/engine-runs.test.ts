@@ -107,6 +107,17 @@ test('pause, resume and cancel are honoured between side effects; page retry; ru
       const meta = await bare.coverage(ctx(), { sourceId: source4.id }); assert.equal(meta.acquiredMetadata, 3); assert.equal(meta.acquiredBytes, 0); assert.equal(meta.bytesAcquired, 0);
       const metaItem = (await bare.listItems(ctx(), { sourceId: source4.id, state: 'metadata_acquired' }))[0]!; const acq = (await bare.getItem(ctx(), metaItem.id)).acquisitions[0];
       assert.equal(acq.level, 'metadata'); assert.equal(acq.storage, 'none'); await rejects(bare.getAcquisitionBytes(ctx(), acq.id), 'invalid_state');
+      // Refresh policy: an interval source is refreshed by the scheduler pass; records that left the listing are reported as missing.
+      const ms = await engine.createSource(ctx(), { name: 'Shrinking', kind: 'html_index', baseUrl: `${fx.base}/plain-index?per=2&pages=2&tag=ms`, config: { itemPattern: '/clean/' }, accessTerms: 'Public', rateLimit: { minIntervalMs: 0 }, refreshPolicy: { mode: 'interval', intervalSeconds: 3600 } });
+      await engine.startCollection(ctx(), { sourceId: ms.id, level: 'metadata' }); await drain(engine);
+      assert.ok(Date.parse((await engine.getSource(ctx(), ms.id)).nextRefreshAt) > Date.now() + 3_500_000);
+      assert.deepEqual(await engine.runDueWork(), [], 'nothing is due yet');
+      await engine.updateSource(ctx(), ms.id, { baseUrl: `${fx.base}/plain-index?per=2&pages=1&tag=ms` });
+      const dueRuns = await engine.runDueWork(new Date(Date.now() + 3_700_000)); assert.equal(dueRuns.length, 1); await drain(engine);
+      const refreshed = await engine.getRun(ctx(), dueRuns[0]!); assert.equal(refreshed.kind, 'refresh'); assert.equal(refreshed.createdBy, 'discovery-scheduler'); assert.equal(refreshed.state, 'completed');
+      assert.deepEqual({ missing: refreshed.summary.missing, unchanged: refreshed.summary.unchanged, added: refreshed.summary.newItems }, { missing: 2, unchanged: 4, added: 0 });
+      assert.equal((await engine.listItems(ctx(), { sourceId: ms.id })).filter((i) => i.missingSince !== null).length, 2);
+      assert.equal((await engine.inspect(ctx(), ms.ref))!.versions.length, 2, 'source revisions are kept');
     });
   } finally { await fx.close(); }
 });
