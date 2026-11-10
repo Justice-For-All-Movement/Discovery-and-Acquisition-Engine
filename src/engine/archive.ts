@@ -35,7 +35,7 @@ function synthetic(ctx: Context, bytes: Uint8Array, contentType: string, userAge
   const policy: SourcePolicy = { tenantId: ctx.tenantId, projectId: ctx.projectId, id: 'private-archive-import', allowedHosts: ['archive-import.invalid'], enabled: true, expiresAt: new Date(Date.parse(ctx.now) + 86_400_000).toISOString(), maximumBytes: MAX_ARCHIVE, maximumRedirects: 0, userAgent, accessBasis: 'private archive supplied by the operator' };
   return { policy, capture: { tenantId: ctx.tenantId, projectId: ctx.projectId, sourcePolicyId: policy.id, requestedUrl: url, finalUrl: url, retrievedAt: ctx.now, status: 200, contentType, sha256: sha(bytes), bytes, redirects: [], etag: null, lastModified: null } };
 }
-const wrap = <T>(fn: () => T): T => { try { return fn(); } catch (e) { if (e instanceof DomainError) throw new DomainError('invalid_input', `Archive rejected (${e.code}): ${e.message}`); throw e; } };
+const wrap = <T>(fn: () => T): T => { try { return fn(); } catch (e) { if (e instanceof DomainError) throw new DomainError('invalid_input', `Archive rejected (${e.code}): ${e.message}${e.code === 'unsafe_archive_path' ? ' (directory entries, absolute paths and .. segments are refused; create ZIPs without directory entries, e.g. zip -D)' : ''}`); throw e; } };
 
 function withManifest(files: { path: string; bytes: Uint8Array; originalUrl?: string | null; retrievedAt?: string | null; mediaType?: string | null; recordId?: string }[], manifest: ArchiveManifest | null, matchUrl: boolean): { entries: ArchiveEntry[]; missing: ArchiveRead['missing'] } {
   const used = new Set<ArchiveManifestEntry>();

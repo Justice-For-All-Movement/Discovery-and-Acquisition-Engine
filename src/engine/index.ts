@@ -500,7 +500,7 @@ export function createEngine(deps: DiscoveryDeps) {
   }
   const leadPublic = async (q: Sql, r: Rec): Promise<Rec> => ({
     ...camel(r), ref: ref('lead', r.id),
-    routes: (await q.query(`select * from ${S}.lead_routes where tenant_id=$1 and project_id=$2 and lead_id=$3 order by created_at, id`, [r.tenant_id, r.project_id, r.id])).map((x) => ({ ...camel(x), ref: ref('lead_route', x.id) })),
+    routes: (await q.query(`select * from ${S}.lead_routes where tenant_id=$1 and project_id=$2 and lead_id=$3 order by seq`, [r.tenant_id, r.project_id, r.id])).map((x) => ({ ...(({ seq: _seq, ...rest }) => rest)(camel(x)), ref: ref('lead_route', x.id) })),
     note: 'Route verification state describes the channel only. identityState and knowledgeState are separate and are never changed by channel verification.',
   });
   async function createLead(ctx: ServiceContext, input: LeadInput): Promise<Rec> {

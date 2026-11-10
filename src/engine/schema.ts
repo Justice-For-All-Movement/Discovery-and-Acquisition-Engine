@@ -97,7 +97,7 @@ create table {s}.leads (
   created_by text not null, created_at timestamptz not null, updated_at timestamptz not null, unique (tenant_id, project_id, dedupe_key)
 );
 create table {s}.lead_routes (
-  ${scope}, id uuid primary key, lead_id uuid not null, kind text not null, value text not null,
+  ${scope}, id uuid primary key, seq bigint generated always as identity, lead_id uuid not null, kind text not null, value text not null,
   provenance_ref text, provenance_url text, provenance_note text,
   verification_state text not null default 'unverified', verification_note text, verified_at timestamptz, verified_by text,
   created_at timestamptz not null, unique (lead_id, kind, value)
