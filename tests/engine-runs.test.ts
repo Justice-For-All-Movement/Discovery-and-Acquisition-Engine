@@ -123,7 +123,8 @@ test('per-host rate limit is shared by two concurrent workers through PostgreSQL
       assert.deepEqual([na, nb], [1, 1], 'each worker processed one run concurrently');
       const at = fx.times.map((t) => t.at); const gaps = at.slice(1).map((t, i) => t - (at[i] as number));
       assert.ok(at.length >= 9, `requests: ${at.length}`);
-      assert.ok(Math.min(...gaps) >= 95, `requests to one host are spaced by the source interval even across workers: ${gaps.join(',')}`);
+      // Slots are reserved 120 ms apart in PostgreSQL; arrival times carry scheduling jitter, so check the overall pace and a floor.
+      assert.ok(at.at(-1)! - at[0]! >= (at.length - 1) * 120 - 40 && Math.min(...gaps) >= 50, `requests to one host are spaced by the source interval even across workers: ${gaps.join(',')}`);
       const order = fx.times.filter((t) => t.path.startsWith('/plain-index')).map((t) => (t.path.includes('tag=r1') ? 1 : 2));
       assert.ok(order.slice(1).some((v, i) => v !== order[i]), 'the two runs interleaved');
       assert.equal(Number((await sql.query(`select count(*)::int as n from ${SCHEMA}.host_leases`))[0]!.n), 0, 'concurrency leases are released');

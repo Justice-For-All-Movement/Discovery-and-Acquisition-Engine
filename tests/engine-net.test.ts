@@ -107,3 +107,15 @@ test('deterministic contact-lead extractors', () => {
   assert.equal(leads.length, 5); assert.deepEqual(extractLeads('<html><body><p>No contacts here, only prose about a@b</p></body></html>', 'https://example.org/'), []);
   assert.deepEqual(extractLeads('<a href="mailto:%00bad">x</a><a href="javascript:alert(1)">y</a><script type="application/ld+json">{not json</script>', 'https://example.org/'), []);
 });
+
+test('parsers stay bounded on hostile input', async () => {
+  const { parseHtml, htmlListing, feedListing, sitemapListing } = await import('../src/engine/parse.ts');
+  const { robotsMatch } = await import('../src/engine/net.ts');
+  const n = 200_000;
+  const hostile = ['<a ' + 'x=1 '.repeat(n), '<'.repeat(n), '<div>'.repeat(n), '<!--'.repeat(n), '<![CDATA['.repeat(n), '<a href="mailto:a@b.example">'.repeat(n / 5), '<item><title><![CDATA['.repeat(n / 4), '<url><loc>'.repeat(n / 4), '<li class="staff"><b>x</b>'.repeat(n / 10)];
+  const started = Date.now();
+  for (const input of hostile) { parseHtml(input); extractLeads(input, 'https://example.org/'); htmlListing(input, 'https://example.org/'); feedListing(input, 'https://example.org/'); sitemapListing(input, 'https://example.org/'); }
+  assert.equal(robotsMatch(`/${'*a'.repeat(60)}$`, `/${'a'.repeat(20_000)}b`), false);
+  assert.ok(Date.now() - started < 30_000, `hostile inputs took ${Date.now() - started} ms`);
+  assert.equal(robotsMatch('/a*c$', '/abc'), true); assert.equal(robotsMatch('/a*c$', '/abcd'), false); assert.equal(robotsMatch('/a', '/abc'), true); assert.equal(robotsMatch('/*.pdf', '/x/y.pdf?z'), true); assert.equal(robotsMatch('/b', '/abc'), false);
+});

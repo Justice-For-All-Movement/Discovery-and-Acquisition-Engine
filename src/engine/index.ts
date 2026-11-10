@@ -658,8 +658,9 @@ export function createEngine(deps: DiscoveryDeps) {
     const sameContent = prior !== undefined && prior.sha256 === sha256 && (prior.level === 'bytes' || level === 'metadata');
     const isText = /html|^text\/|xml/.test(mediaType);
     const text = isText ? decodeText(bytes, o.headers['content-type']) : null;
-    const root = text !== null && /html/.test(mediaType) ? parseHtml(text) : null;
-    const meta: Rec = root !== null ? pageMetadata(root, o.finalUrl) : {};
+    // Parsing untrusted content must never abort the acquisition: a parser failure is recorded and the bytes are still kept.
+    let root: ReturnType<typeof parseHtml> | null = null; let meta: Rec = {};
+    try { root = text !== null && /html/.test(mediaType) ? parseHtml(text) : null; if (root !== null) meta = pageMetadata(root, o.finalUrl); } catch { root = null; meta = { parserError: true }; }
     if (o.declaredMediaType !== null && o.declaredMediaType !== mediaType) { meta.declaredMediaType = o.declaredMediaType; meta.mediaTypeMismatch = true; }
     const acquisitionId = randomUUID(); const revision = prior === undefined ? 1 : Number(prior.revision) + 1;
     const origin: Rec = { kind: 'discovery', receipt: ref('receipt', receiptId), url: o.finalUrl, requestUrl: o.requestUrl, retrievedAt: o.finishedAt, sha256, source: ref('source', source.id, source.revision), item: itemRef, acquisition: ref('acquisition', acquisitionId, revision), reuse: source.reuse, accessTerms: source.access_terms,
@@ -684,8 +685,11 @@ export function createEngine(deps: DiscoveryDeps) {
         });
       }
     }
-    const leads = run.options.extractLeads !== null && run.options.extractLeads !== undefined && root !== null && text !== null ? extractLeads(text, o.finalUrl, { ...(Array.isArray(source.config.contactTerms) ? { contactTerms: source.config.contactTerms } : {}) }) : [];
-    const sketch = sameContent || text === null ? null : shingleSketch(root !== null ? mainText(root) : text);
+    let leads: ExtractedLead[] = []; let sketch: number[] | null = null;
+    try {
+      if (run.options.extractLeads !== null && run.options.extractLeads !== undefined && root !== null && text !== null) leads = extractLeads(text, o.finalUrl, { ...(Array.isArray(source.config.contactTerms) ? { contactTerms: source.config.contactTerms } : {}) });
+      sketch = sameContent || text === null ? null : shingleSketch(root !== null ? mainText(root) : text);
+    } catch { meta.parserError = true; }
     await sql.tx(async (tx) => {
       await assertLease(tx, env.job); const ctx = env.ctx();
       const resolve = async (): Promise<void> => {

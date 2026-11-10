@@ -314,9 +314,20 @@ export function parseRobots(text: string): RobotsGroup[] {
   }
   return groups;
 }
-function robotsPattern(path: string): RegExp {
-  const anchored = path.endsWith('$'); const body = anchored ? path.slice(0, -1) : path;
-  return new RegExp(`^${body.split('*').map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')}${anchored ? '$' : ''}`);
+/** Linear-time robots path match: `*` matches any run, a trailing `$` anchors the end; otherwise the rule is a prefix. */
+export function robotsMatch(rule: string, path: string): boolean {
+  const anchored = rule.endsWith('$'); const parts = (anchored ? rule.slice(0, -1) : rule).split('*');
+  const first = parts[0] as string;
+  if (!path.startsWith(first)) return false;
+  if (parts.length === 1) return anchored ? path.length === first.length : true;
+  let at = first.length;
+  for (let i = 1; i < parts.length; i++) {
+    const part = parts[i] as string; const last = i === parts.length - 1;
+    if (last && anchored) return path.length - part.length >= at && path.endsWith(part);
+    const found = path.indexOf(part, at); if (found < 0) return false;
+    at = found + part.length;
+  }
+  return true;
 }
 export type RobotsDecision = Readonly<{ allowed: boolean; rule: string | null; group: string | null; crawlDelaySeconds: number | null }>;
 export function robotsDecide(groups: readonly RobotsGroup[], userAgent: string, pathAndQuery: string): RobotsDecision {
@@ -328,7 +339,7 @@ export function robotsDecide(groups: readonly RobotsGroup[], userAgent: string, 
   if (chosen.length === 0) { chosen = groups.filter((g) => g.agents.includes('*')); name = chosen.length > 0 ? '*' : null; }
   let match: { allow: boolean; path: string } | null = null;
   for (const g of chosen) for (const r of g.rules) {
-    if (!robotsPattern(r.path).test(pathAndQuery)) continue;
+    if (!robotsMatch(r.path, pathAndQuery)) continue;
     if (match === null || r.path.length > match.path.length || (r.path.length === match.path.length && r.allow)) match = r;
   }
   const delay = chosen.map((g) => g.crawlDelay).find((d) => d !== null) ?? null;

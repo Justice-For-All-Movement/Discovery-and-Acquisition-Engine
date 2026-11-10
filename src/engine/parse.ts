@@ -9,7 +9,7 @@ export function decodeText(bytes: Uint8Array, contentType: string | null | undef
   const meta = declared ?? /<meta[^>]+charset\s*=\s*["']?([A-Za-z0-9._-]+)/i.exec(Buffer.from(slice.subarray(0, 2048)).toString('latin1'))?.[1];
   for (const label of [meta, 'utf-8']) {
     if (label === undefined) continue;
-    try { return new TextDecoder(label, { fatal: label === 'utf-8' && meta !== undefined && meta.toLowerCase() !== 'utf-8' ? false : false }).decode(slice); } catch { /* unknown label */ }
+    try { return new TextDecoder(label).decode(slice); } catch { /* unknown label */ }
   }
   return Buffer.from(slice).toString('latin1');
 }
@@ -24,29 +24,36 @@ export function decodeEntities(s: string): string {
 // ───────────────────────────── Tolerant HTML tree ─────────────────────────────
 export type HtmlNode = { tag: string; attrs: Record<string, string>; children: (HtmlNode | string)[]; parent: HtmlNode | null };
 const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
-const TOKEN = /<!--[\s\S]*?-->|<!\[CDATA\[([\s\S]*?)\]\]>|<![^>]*>|<\?[^>]*>|<(\/?)([a-zA-Z][a-zA-Z0-9:_-]*)((?:\s+[^\s"'<>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>]+))?)*)\s*(\/?)>|[^<]+|</g;
+const TOKEN = /(\u0000\u0000never)|<![^>]{0,2000}>|<\?[^>]{0,2000}>|<(\/?)([a-zA-Z][a-zA-Z0-9:_-]*)((?:\s+[^\s"'<>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>]+))?)*)\s*(\/?)>|[^<]+|</g;
 const ATTR = /([^\s"'<>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>]+)))?/g;
+/** Elements nested deeper than this become siblings, which bounds every recursive walk over the tree. */
+const MAX_DEPTH = 200;
 export function parseHtml(input: string, maxNodes = 200_000): HtmlNode {
   const root: HtmlNode = { tag: '#root', attrs: {}, children: [], parent: null };
-  let cur = root; let count = 0;
+  let cur = root; let count = 0; let depth = 0;
   TOKEN.lastIndex = 0;
   let m: RegExpExecArray | null;
-  while ((m = TOKEN.exec(input)) !== null && count < maxNodes) {
+  for (;;) {
+    // Comments and CDATA are skipped with indexOf so an unterminated one costs one scan, not one per position.
+    const at = TOKEN.lastIndex;
+    if (input.startsWith('<!--', at)) { const end = input.indexOf('-->', at + 4); if (end < 0) break; TOKEN.lastIndex = end + 3; continue; }
+    if (input.startsWith('<![CDATA[', at)) { const end = input.indexOf(']]>', at + 9); cur.children.push(input.slice(at + 9, end < 0 ? input.length : end)); if (end < 0) break; TOKEN.lastIndex = end + 3; continue; }
+    if ((m = TOKEN.exec(input)) === null || count >= maxNodes) break;
     const tok = m[0];
-    if (m[1] !== undefined) { cur.children.push(m[1]); continue; }
     if (m[3] === undefined) { if (!tok.startsWith('<!') && !tok.startsWith('<?')) cur.children.push(tok === '<' ? '<' : decodeEntities(tok)); continue; }
     const tag = m[3].toLowerCase();
     if (m[2] === '/') {
       let n: HtmlNode | null = cur;
-      while (n !== null && n.tag !== tag) n = n.parent;
-      if (n !== null && n.parent !== null) cur = n.parent;
+      let up = 1;
+      while (n !== null && n.tag !== tag) { n = n.parent; up++; }
+      if (n !== null && n.parent !== null) { cur = n.parent; depth -= up; }
       continue;
     }
     const attrs: Record<string, string> = {};
     ATTR.lastIndex = 0;
     let a: RegExpExecArray | null;
     while ((a = ATTR.exec(m[4] ?? '')) !== null) { const k = (a[1] as string).toLowerCase(); if (!Object.hasOwn(attrs, k)) attrs[k] = decodeEntities(a[2] ?? a[3] ?? a[4] ?? ''); }
-    if ((tag === 'p' || tag === 'li') && cur.tag === tag && cur.parent !== null) cur = cur.parent;
+    if ((tag === 'p' || tag === 'li') && cur.tag === tag && cur.parent !== null) { cur = cur.parent; depth--; }
     const node: HtmlNode = { tag, attrs, children: [], parent: cur };
     cur.children.push(node); count++;
     if (tag === 'script' || tag === 'style') {
@@ -56,7 +63,7 @@ export function parseHtml(input: string, maxNodes = 200_000): HtmlNode {
       TOKEN.lastIndex = end === null ? input.length : close.lastIndex;
       continue;
     }
-    if (!VOID.has(tag) && m[5] !== '/') cur = node;
+    if (!VOID.has(tag) && m[5] !== '/' && depth < MAX_DEPTH) { cur = node; depth++; }
   }
   return root;
 }
@@ -133,16 +140,30 @@ export function htmlListing(html: string, pageUrl: string, options: { itemPatter
   });
   return { items: [...items.values()], next };
 }
-const xmlText = (s: string | undefined): string | null => { if (s === undefined) return null; const t = squash(decodeEntities(s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/<[^>]+>/g, ''))); return t === '' ? null : t; };
-const xmlTag = (block: string, tag: string): string | null => xmlText(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)</${tag}>`, 'i').exec(block)?.[1]);
+/** Linear-time `<tag ...>…</tag>` splitter: an unterminated element ends the scan instead of rescanning from every start. */
+function xmlBlocks(xml: string, tag: string, max = 50_000): string[] {
+  const out: string[] = []; const lower = xml.toLowerCase(); const open = `<${tag.toLowerCase()}`; const close = `</${tag.toLowerCase()}>`;
+  let at = 0;
+  while (out.length < max) {
+    const start = lower.indexOf(open, at); if (start < 0) break;
+    const after = lower.charCodeAt(start + open.length); // next char must end the tag name
+    if (!(after === 62 || after === 47 || after === 32 || after === 9 || after === 10 || after === 13)) { at = start + open.length; continue; }
+    const gt = lower.indexOf('>', start); if (gt < 0) break;
+    const end = lower.indexOf(close, gt); if (end < 0) break;
+    out.push(xml.slice(gt + 1, end)); at = end + close.length;
+  }
+  return out;
+}
+const xmlText = (raw: string | undefined): string | null => { if (raw === undefined) return null; const s = raw.slice(0, 20_000); const t = squash(decodeEntities(s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/<[^>]+>/g, ''))); return t === '' ? null : t; };
+const xmlTag = (block: string, tag: string): string | null => xmlText(xmlBlocks(block, tag, 1)[0]);
 export function sitemapListing(xml: string, pageUrl: string): Listing {
   const out: Listing = { items: [], next: [] };
   const index = /<sitemapindex\b/i.test(xml);
-  for (const m of xml.matchAll(index ? /<sitemap\b[^>]*>([\s\S]*?)<\/sitemap>/gi : /<url\b[^>]*>([\s\S]*?)<\/url>/gi)) {
-    const loc = xmlTag(m[1] as string, 'loc'); const url = loc === null ? null : absoluteUrl(loc, pageUrl);
+  for (const block of xmlBlocks(xml, index ? 'sitemap' : 'url')) {
+    const loc = xmlTag(block, 'loc'); const url = loc === null ? null : absoluteUrl(loc, pageUrl);
     if (url === null) continue;
     if (index) out.next.push(url);
-    else { const lastmod = xmlTag(m[1] as string, 'lastmod'); out.items.push({ url, title: null, metadata: lastmod === null ? {} : { lastmod } }); }
+    else { const lastmod = xmlTag(block, 'lastmod'); out.items.push({ url, title: null, metadata: lastmod === null ? {} : { lastmod } }); }
   }
   return out;
 }
@@ -150,17 +171,17 @@ export function feedListing(xml: string, pageUrl: string): Listing {
   const out: Listing = { items: [], next: [] };
   const atom = /<feed\b/i.test(xml) && !/<rss\b/i.test(xml);
   const linkAttr = (tagText: string, name: string): string | null => { const v = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'i').exec(tagText); return v === null ? null : decodeEntities(v[1] ?? v[2] ?? ''); };
-  const head = xml.replace(/<(item|entry)\b[\s\S]*$/i, '');
-  for (const m of `${head}${xml.slice(-4000)}`.matchAll(/<(?:atom:)?link\b[^>]*>/gi)) {
+  const firstEntry = xml.search(/<(item|entry)[\s>]/i); const head = (firstEntry < 0 ? xml : xml.slice(0, firstEntry)).slice(0, 200_000);
+  for (const m of `${head}${xml.slice(-4000)}`.matchAll(/<(?:atom:)?link\b[^>]{0,4000}>/gi)) {
     if ((linkAttr(m[0], 'rel') ?? '').toLowerCase() === 'next') { const u = absoluteUrl(linkAttr(m[0], 'href') ?? '', pageUrl); if (u !== null && !out.next.includes(u)) out.next.push(u); }
   }
   const total = xmlTag(xml, 'opensearch:totalResults');
   if (total !== null && /^\d+$/.test(total)) out.total = Number(total);
-  for (const m of xml.matchAll(atom ? /<entry\b[^>]*>([\s\S]*?)<\/entry>/gi : /<item\b[^>]*>([\s\S]*?)<\/item>/gi)) {
-    const block = m[1] as string;
+  for (const full of xmlBlocks(xml, atom ? 'entry' : 'item')) {
+    const block = full.slice(0, 200_000);
     let link: string | null = null;
     if (atom) {
-      const links = [...block.matchAll(/<link\b[^>]*>/gi)].map((l) => ({ rel: (linkAttr(l[0], 'rel') ?? 'alternate').toLowerCase(), href: linkAttr(l[0], 'href') }));
+      const links = [...block.matchAll(/<link\b[^>]{0,4000}>/gi)].map((l) => ({ rel: (linkAttr(l[0], 'rel') ?? 'alternate').toLowerCase(), href: linkAttr(l[0], 'href') }));
       link = (links.find((l) => l.rel === 'alternate') ?? links[0])?.href ?? null;
     } else link = xmlTag(block, 'link') ?? (/isPermaLink\s*=\s*["']false/i.test(block) ? null : xmlTag(block, 'guid'));
     const url = link === null ? null : absoluteUrl(link, pageUrl);
@@ -170,7 +191,7 @@ export function feedListing(xml: string, pageUrl: string): Listing {
     if (published !== null) metadata.published = published.slice(0, 100);
     const guid = xmlTag(block, atom ? 'id' : 'guid'); if (guid !== null) metadata.guid = guid.slice(0, 500);
     const summary = xmlTag(block, atom ? 'summary' : 'description'); if (summary !== null) metadata.summary = summary.slice(0, 1000);
-    const enclosure = /<enclosure\b[^>]*>/i.exec(block); const encUrl = enclosure === null ? null : absoluteUrl(linkAttr(enclosure[0], 'url') ?? '', pageUrl);
+    const enclosure = /<enclosure\b[^>]{0,4000}>/i.exec(block); const encUrl = enclosure === null ? null : absoluteUrl(linkAttr(enclosure[0], 'url') ?? '', pageUrl);
     if (encUrl !== null) metadata.enclosure = encUrl;
     out.items.push({ url, title: xmlTag(block, 'title')?.slice(0, 500) ?? null, metadata });
   }
@@ -323,13 +344,15 @@ const mailtoOf = (n: HtmlNode): string | null => (n.tag === 'a' && /^mailto:/i.t
 function decodeURIComponentSafe(s: string): string { try { return decodeURIComponent(s); } catch { return s; } }
 const STAFF = /\b(staff|team-member|team_member|person|people|member|vcard|h-card|profile|employee|contact-card|bio)\b/i;
 const NAME = /\b(name|fn|p-name)\b/i; const ROLE = /\b(role|title|position|job|p-job-title|p-role)\b/i; const ORG = /\b(org|organization|organisation|p-org|affiliation)\b/i;
+/** A page yielding more candidates than this is truncated: extraction cost stays bounded on hostile pages. */
+const MAX_LEADS = 1000;
 export function extractLeads(html: string, pageUrl: string, options: { contactTerms?: readonly string[] } = {}): ExtractedLead[] {
   const root = parseHtml(html);
   const out: ExtractedLead[] = [];
   jsonLdLeads(root, out);
   const claimed = new Set<HtmlNode>();
   // Staff listings: a card-like element containing exactly one mailto link and a name.
-  for (const card of findAll(root, (n) => ['li', 'div', 'tr', 'article', 'section', 'dl'].includes(n.tag) && STAFF.test(n.attrs.class ?? ''))) {
+  for (const card of findAll(root, (n) => ['li', 'div', 'tr', 'article', 'section', 'dl'].includes(n.tag) && STAFF.test(n.attrs.class ?? '')).slice(0, MAX_LEADS)) {
     const mails = findAll(card, (n) => mailtoOf(n) !== null);
     if (mails.length !== 1) continue;
     const pick = (re: RegExp): string | null => { const n = findAll(card, (x) => classHas(x, re) && x.tag !== 'a')[0]; return n === undefined ? null : squash(textOf(n)).slice(0, 200) || null; };
@@ -348,26 +371,27 @@ export function extractLeads(html: string, pageUrl: string, options: { contactTe
     if (/^h[1-6]$/.test(n.tag) && isTerm(textOf(n)) && n.parent !== null && n.parent.tag !== '#root' && n.parent.tag !== 'body') { sections.add(n.parent); }
     return true;
   });
-  for (const section of sections) {
+  for (const section of [...sections].slice(0, 200)) {
     const routes: ExtractedRoute[] = [];
     const text = textOf(section);
     for (const a of findAll(section, (n) => mailtoOf(n) !== null)) { if (claimed.has(a)) continue; claimed.add(a); routes.push({ kind: 'email', value: mailtoOf(a) as string }); }
-    for (const e of text.match(EMAIL) ?? []) routes.push({ kind: 'email', value: e.toLowerCase() });
+    for (const e of (text.slice(0, 50_000).match(EMAIL) ?? []).slice(0, 50)) routes.push({ kind: 'email', value: e.toLowerCase() });
     for (const form of findAll(section, (n) => n.tag === 'form')) { const u = absoluteUrl(form.attrs.action ?? '', pageUrl) ?? pageUrl; routes.push({ kind: 'web_form', value: u }); }
     const addr = section.tag === 'address' ? section : findAll(section, (n) => n.tag === 'address')[0];
     if (addr !== undefined) { const t = squash(textOf(addr).replace(EMAIL, ' ')).slice(0, 500); if (t.length >= 8) routes.push({ kind: 'postal', value: t }); }
+    routes.splice(60);
     const unique = routes.filter((r, i) => routes.findIndex((x) => x.kind === r.kind && x.value === r.value) === i);
     if (unique.length > 0) out.push({ personName: null, role: null, organization: null, routes: unique, extractor: 'contact_section', context: squash(text).slice(0, 300) });
   }
   // Remaining mailto links.
-  for (const a of findAll(root, (n) => mailtoOf(n) !== null)) {
+  for (const a of findAll(root, (n) => mailtoOf(n) !== null).slice(0, MAX_LEADS)) {
     if (claimed.has(a)) continue;
     const label = squash(textOf(a)); const email = mailtoOf(a) as string;
     out.push({ personName: label !== '' && emailOk(label) === null && label.length <= 120 && /\p{L}/u.test(label) && label.split(' ').length <= 6 && !isTerm(label) && !/e-?mail/i.test(label) ? label : null, role: null, organization: null, routes: [{ kind: 'email', value: email }], extractor: 'mailto', context: squash(textOf(a.parent ?? a)).slice(0, 300) });
   }
   // Merge leads that share an e-mail route; structured data wins on names.
   const merged: ExtractedLead[] = [];
-  for (const lead of out) {
+  for (const lead of out.slice(0, MAX_LEADS)) {
     const emails = lead.routes.filter((r) => r.kind === 'email').map((r) => r.value);
     const prior = merged.find((m) => m.routes.some((r) => r.kind === 'email' && emails.includes(r.value)) && (m.personName === null || lead.personName === null || m.personName === lead.personName));
     if (prior === undefined) { merged.push({ ...lead, routes: [...lead.routes] }); continue; }
