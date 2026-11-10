@@ -323,7 +323,7 @@ export function robotsDecide(groups: readonly RobotsGroup[], userAgent: string, 
   const token = (userAgent.split(/[\s/]/)[0] ?? '').toLowerCase();
   let chosen: RobotsGroup[] = []; let best = -1; let name: string | null = null;
   for (const g of groups) for (const a of g.agents) {
-    if (a !== '*' && a !== '' && token.includes(a) && a.length > best) { best = a.length; chosen = groups.filter((x) => x.agents.includes(a)); name = a; }
+    if (a !== '*' && a !== '' && token === a && a.length > best) { best = a.length; chosen = groups.filter((x) => x.agents.includes(a)); name = a; }
   }
   if (chosen.length === 0) { chosen = groups.filter((g) => g.agents.includes('*')); name = chosen.length > 0 ? '*' : null; }
   let match: { allow: boolean; path: string } | null = null;
