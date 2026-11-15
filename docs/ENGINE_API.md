@@ -143,6 +143,14 @@ fetched per origin, cached per project, evaluated per RFC 9309 (exact product-to
 crawl-delay raises the interval, an unreachable robots.txt is treated as disallow, and the decision is written into every
 receipt. Setting `robotsPolicy: 'ignore'` needs `discovery:admin`, a human actor and a decision note recorded in audit.
 
+Page-level directives — the `X-Robots-Tag` header (entries scoped to another robot, `otherbot: …`, do not apply) and
+`<meta name="robots">` / `<meta name="<product token>">` — are read from every successful response, recorded on the receipt
+(`robots.pageDirectives`, `robots.pageDirectiveEnforced`) and on the acquisition (`metadata.robotsDirectives`), and enforced
+under `robotsPolicy: 'honour'`: an index/listing page with `nofollow` or `none` is kept as a receipt (outcome
+`robots_nofollow`) but none of its links or next pages are followed (gap `robots_disallowed`); an item with `noarchive` is
+acquired at metadata level — read to describe it, bytes not retained (`storage.note` says why). `noindex`, `nosnippet` and
+valued directives are recorded only (this engine builds no public index). Under `ignore` they are recorded, not enforced.
+
 Access controls are never bypassed: 401/402/403/407/451, challenge pages and operator-configured paywall markers become
 `access_restricted` gaps with one receipt and no retry. 404/410 become `not_found`. 408/425/429/5xx, timeouts and network
 errors become failures with attempts and `nextRetryAt` (Retry-After honoured), retried only by `runDueWork`/`retryFailures`
@@ -246,7 +254,8 @@ the tested service methods.
 - Parsers run in-process with size, node-count, depth and candidate caps (tested against hostile inputs); there is no
   separate parser sandbox process. `itemPattern` is an operator-supplied regular expression and is trusted configuration.
 - No JavaScript rendering, form submission, login flows or cookie sessions: listings that need them appear as gaps.
-- HTML `<meta name="robots">` and `X-Robots-Tag` are recorded (header) but not enforced; only robots.txt is.
+- Page-level robots: `rel="nofollow"` on individual links is not honoured (only page-level `nofollow`/`none`); `unavailable_after` is
+  recorded, not evaluated. Directives on an item page do not suppress lead extraction from that page.
 - Mirror detection covers text formats only; see "Dedupe and independence".
 - A paused/cancelled or crashed worker may repeat the single request that was in flight.
 - Only one run job executes a given run at a time and items within a run are fetched sequentially; parallelism comes from

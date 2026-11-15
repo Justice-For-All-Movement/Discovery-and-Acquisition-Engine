@@ -345,3 +345,33 @@ export function robotsDecide(groups: readonly RobotsGroup[], userAgent: string, 
   const delay = chosen.map((g) => g.crawlDelay).find((d) => d !== null) ?? null;
   return { allowed: match === null ? true : match.allow, rule: match === null ? null : `${match.allow ? 'allow' : 'disallow'}: ${match.path}`, group: name, crawlDelaySeconds: delay };
 }
+
+// ───────────────────────────── Page-level robots directives ─────────────────────────────
+// `X-Robots-Tag` response headers and `<meta name="robots">` / `<meta name="<product token>">` tags. A header entry may be
+// scoped to one crawler (`otherbot: noindex`); only unscoped entries and entries naming this engine's product token apply.
+const VALUED_DIRECTIVES = new Set(['unavailable_after', 'max-snippet', 'max-image-preview', 'max-video-preview']);
+export type PageRobotsDirectives = Readonly<{ directives: readonly string[]; follow: boolean; archive: boolean }>;
+export function pageRobotsDirectives(userAgent: string, header: string | null | undefined, metas: readonly Readonly<{ name: string; content: string }>[]): PageRobotsDirectives {
+  const token = (userAgent.split(/[\s/]/)[0] ?? '').toLowerCase();
+  const found = new Set<string>();
+  const add = (raw: string): void => {
+    const name = (raw.split(':')[0] ?? '').trim().toLowerCase();
+    if (/^[a-z][a-z_-]{0,39}$/.test(name) && found.size < 20) found.add(name);
+  };
+  if (typeof header === 'string') {
+    let scope: string | null = null;
+    for (const part of header.slice(0, 2000).split(',')) {
+      const m = /^\s*([A-Za-z0-9_.-]+)\s*:\s*(.*)$/.exec(part);
+      let directive = part;
+      if (m !== null && !VALUED_DIRECTIVES.has((m[1] as string).toLowerCase())) { scope = (m[1] as string).toLowerCase(); directive = m[2] as string; }
+      if (directive.trim() !== '' && (scope === null || scope === token)) add(directive);
+    }
+  }
+  for (const m of metas.slice(0, 50)) {
+    const name = m.name.trim().toLowerCase();
+    if (name !== 'robots' && name !== token) continue;
+    for (const part of m.content.slice(0, 1000).split(',')) if (part.trim() !== '') add(part);
+  }
+  const directives = [...found].sort();
+  return { directives, follow: !found.has('nofollow') && !found.has('none'), archive: !found.has('noarchive') };
+}

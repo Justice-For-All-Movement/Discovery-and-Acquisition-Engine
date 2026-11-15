@@ -98,6 +98,14 @@ export async function startFixture(): Promise<Fixture> {
     if (p === '/docs/hops') { const n = Number(url.searchParams.get('n') ?? 0); res.writeHead(302, { location: `/docs/hops?n=${n + 1}` }); return void res.end(); }
     if (p === '/docs/moved.html') { res.writeHead(301, { location: '/docs/two.html' }); return void res.end(); }
     if (p === '/docs/slow.html') return; // never answers
+    // Page-level robots directives (X-Robots-Tag and meta robots).
+    if (p === '/robots-meta/index') return html(res, '<html><head><meta name="robots" content="noindex, nofollow"></head><body><a href="/clean/rd-meta-0.html">A</a></body></html>');
+    if (p === '/robots-header/index') return html(res, '<html><body><a href="/clean/rd-hdr-0.html">A</a></body></html>', { 'x-robots-tag': 'pamtestbot: none' });
+    if (p === '/robots-other/index') return html(res, '<html><head><meta name="otherbot" content="nofollow"></head><body><a href="/clean/rd-other-0.html">A</a> <a href="/robots-docs/noarchive-meta.html">B</a> <a href="/robots-docs/noarchive-header.pdf">C</a> <a href="/robots-docs/noindex.html">D</a> <a href="/robots-docs/noarchive-other.html">E</a></body></html>', { 'x-robots-tag': 'otherbot: nofollow, noindex' });
+    if (p === '/robots-docs/noarchive-meta.html') return html(res, articlePage('Archived ledger notice', 'Example Gazette', 'A page that asks robots not to keep an archived copy of it. '.repeat(10)).replace('<head>', '<head><meta name="ROBOTS" content="NOARCHIVE">'));
+    if (p === '/robots-docs/noarchive-header.pdf') return send(res, 200, 'application/pdf', PDF, { 'x-robots-tag': 'noarchive' });
+    if (p === '/robots-docs/noindex.html') return html(res, articlePage('Unindexed ledger page', 'Example Gazette', 'A page that only asks not to be indexed. '.repeat(10)), { 'x-robots-tag': 'noindex' });
+    if (p === '/robots-docs/noarchive-other.html') return html(res, articlePage('Other robot page', 'Example Gazette', 'A page whose noarchive names another robot. '.repeat(10)).replace('<head>', '<head><meta name="otherbot" content="noarchive">'));
     if (p === '/staff.html') return html(res, STAFF_PAGE);
     if (p === '/protected/list') { if (req.headers.authorization !== 'Bearer s3cr3t-token-value') return send(res, 401, 'text/plain', 'auth required', { 'www-authenticate': 'Bearer realm="x"' }); return html(res, '<html><body><a href="/clean/prot-1-0.html">P</a></body></html>'); }
     if (p === '/api/items') {
