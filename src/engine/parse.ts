@@ -262,6 +262,11 @@ export function pageMetadata(root: HtmlNode, pageUrl: string): PageMetadata {
     published: meta(['article:published_time', 'date', 'dc.date']), language: findAll(root, (n) => n.tag === 'html')[0]?.attrs.lang?.slice(0, 35) ?? null, author: meta(['author']),
   };
 }
+/** `<meta name=… content=…>` pairs, for robots directives. Bounded; names are lower-cased. */
+export function robotsMetaTags(root: HtmlNode): { name: string; content: string }[] {
+  return findAll(root, (n) => n.tag === 'meta' && typeof n.attrs.name === 'string' && typeof n.attrs.content === 'string').slice(0, 50)
+    .map((n) => ({ name: (n.attrs.name as string).toLowerCase().slice(0, 100), content: (n.attrs.content as string).slice(0, 1000) }));
+}
 const DEFAULT_CHALLENGE = [/class\s*=\s*["'][^"']*\b(g-recaptcha|h-captcha|cf-turnstile)\b/i, /id\s*=\s*["']challenge-form["']/i, /\/cdn-cgi\/challenge-platform\//i];
 /** Detects interactive challenges or operator-configured paywall markers in an otherwise successful page. */
 export function accessMarker(text: string, extra: readonly string[] = []): string | null {

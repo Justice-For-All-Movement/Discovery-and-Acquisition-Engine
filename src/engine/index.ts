@@ -5,10 +5,10 @@ import type { Json } from '../contracts.ts';
 import * as kit from '../service-kit.ts';
 import type { AuditRecord, EngineEvent, EngineManifestV1, Inspection, Job, ObjectStore, Route, SearchHit, ServiceContext, Sql, StandardEngine, UpstreamChange } from '../service-kit.ts';
 import { SCHEMA, migrations } from './schema.ts';
-import { parseRobots, robotsDecide, safeFetch, sniffMediaType, vetUrl, FetchBlock } from './net.ts';
-import type { FetchOutcome, FetchPolicy, Resolver } from './net.ts';
-import { accessMarker, canonicalUrl, decodeText, extractLeads, feedListing, htmlListing, jsonListing, linkHeaderNext, mainText, pageMetadata, parseHtml, shingleSketch, sitemapListing, sketchSimilarity } from './parse.ts';
-import type { ExtractedLead, Listing } from './parse.ts';
+import { pageRobotsDirectives, parseRobots, robotsDecide, safeFetch, sniffMediaType, vetUrl, FetchBlock } from './net.ts';
+import type { FetchOutcome, FetchPolicy, PageRobotsDirectives, Resolver } from './net.ts';
+import { accessMarker, canonicalUrl, decodeText, extractLeads, feedListing, htmlListing, jsonListing, linkHeaderNext, mainText, pageMetadata, parseHtml, robotsMetaTags, shingleSketch, sitemapListing, sketchSimilarity } from './parse.ts';
+import type { ExtractedLead, HtmlNode, Listing } from './parse.ts';
 import { readArchive } from './archive.ts';
 import type { ArchiveManifest } from './archive.ts';
 
@@ -203,6 +203,20 @@ export function createEngine(deps: DiscoveryDeps) {
   }
 
   // ───────────── receipts ─────────────
+  /** Page-level robots directives (X-Robots-Tag, meta robots) of a successful response. Parsing failures yield header-only directives. */
+  function directivesOf(o: FetchOutcome, root?: HtmlNode | null): PageRobotsDirectives {
+    let metas: { name: string; content: string }[] = [];
+    try {
+      if (root === undefined) { if (o.bytes !== null && /html/.test(o.mediaType ?? '')) metas = robotsMetaTags(parseHtml(decodeText(o.bytes, o.headers['content-type']))); }
+      else if (root !== null) metas = robotsMetaTags(root);
+    } catch { metas = []; }
+    return pageRobotsDirectives(fetchPolicy.userAgent, o.headers['x-robots-tag'], metas);
+  }
+  /** Adds page directives to a receipt's robots record, and which one was enforced (only under the `honour` policy). */
+  function robotsWithPage(source: Rec, robots: Rec, d: PageRobotsDirectives, enforced: string | null): Rec {
+    if (d.directives.length === 0) return robots;
+    return { ...robots, pageDirectives: [...d.directives], pageDirectiveEnforced: source.robots_policy === 'honour' ? enforced : null };
+  }
   function buildReceipt(ctx: ServiceContext, source: Rec, o: FetchOutcome | null, x: { id?: string; kind?: string; purpose: string; runId?: string | null; itemId?: string | null; robots?: Rec; conditional?: Rec | null; storage?: Rec; outcome?: string; message?: string; requestUrl?: string; sha256?: string; size?: number; mediaType?: string }): Rec {
     const now = new Date().toISOString();
     const r: Rec = {
@@ -655,18 +669,23 @@ export function createEngine(deps: DiscoveryDeps) {
     }
     // Successful retrieval.
     const bytes = o.bytes as Uint8Array; const sha256 = o.sha256 as string; const mediaType = o.mediaType as string;
-    const sameContent = prior !== undefined && prior.sha256 === sha256 && (prior.level === 'bytes' || level === 'metadata');
     const isText = /html|^text\/|xml/.test(mediaType);
     const text = isText ? decodeText(bytes, o.headers['content-type']) : null;
     // Parsing untrusted content must never abort the acquisition: a parser failure is recorded and the bytes are still kept.
     let root: ReturnType<typeof parseHtml> | null = null; let meta: Rec = {};
     try { root = text !== null && /html/.test(mediaType) ? parseHtml(text) : null; if (root !== null) meta = pageMetadata(root, o.finalUrl); } catch { root = null; meta = { parserError: true }; }
     if (o.declaredMediaType !== null && o.declaredMediaType !== mediaType) { meta.declaredMediaType = o.declaredMediaType; meta.mediaTypeMismatch = true; }
+    // Page-level robots: under the `honour` policy `noarchive` means the bytes are read to describe the document but not retained.
+    const pageRobots = directivesOf(o, root);
+    const noArchive = level === 'bytes' && source.robots_policy === 'honour' && !pageRobots.archive;
+    const lvl: 'metadata' | 'bytes' = noArchive ? 'metadata' : level;
+    if (pageRobots.directives.length > 0) { meta.robotsDirectives = [...pageRobots.directives]; base.robots = robotsWithPage(source, pf.robots, pageRobots, noArchive ? 'noarchive' : null); }
+    const sameContent = prior !== undefined && prior.sha256 === sha256 && (prior.level === 'bytes' || lvl === 'metadata');
     const acquisitionId = randomUUID(); const revision = prior === undefined ? 1 : Number(prior.revision) + 1;
     const origin: Rec = { kind: 'discovery', receipt: ref('receipt', receiptId), url: o.finalUrl, requestUrl: o.requestUrl, retrievedAt: o.finishedAt, sha256, source: ref('source', source.id, source.revision), item: itemRef, acquisition: ref('acquisition', acquisitionId, revision), reuse: source.reuse, accessTerms: source.access_terms,
       ...(prior?.evidence_ref ? { previousEvidenceRef: prior.evidence_ref, changedContent: true } : {}) };
-    let storage: Rec = { kind: 'none', note: level === 'metadata' ? 'Metadata-level acquisition: the response was read to describe the document; its bytes were not retained' : 'Content unchanged; bytes already held' };
-    if (!sameContent && level === 'bytes') {
+    let storage: Rec = { kind: 'none', note: noArchive ? 'The page carries a robots noarchive directive and robots are honoured: the response was read to describe the document; its bytes were not retained' : level === 'metadata' ? 'Metadata-level acquisition: the response was read to describe the document; its bytes were not retained' : 'Content unchanged; bytes already held' };
+    if (!sameContent && lvl === 'bytes') {
       try { storage = await storeOriginal(env.ctx(), source, bytes, { sha256, mediaType, filename: filenameFor(o.finalUrl, o), origin, key: `e04-${item.id}-${sha256}` }); }
       catch (error) {
         if (error instanceof DomainError && error.code === 'lease_lost') throw error;
@@ -703,16 +722,16 @@ export function createEngine(deps: DiscoveryDeps) {
       }
       const family = await assignFamily(tx, ctx, { sha256, size: o.size as number, mediaType, sketch, canonicalTarget: typeof meta.canonicalLink === 'string' && canonicalUrl(meta.canonicalLink) !== item.canonical_url ? canonicalUrl(meta.canonicalLink) : null, itemId: item.id });
       const receipt = buildReceipt(ctx, source, o, { ...base, storage });
-      await settleItem(tx, env, ctx, item, level, level === 'bytes' ? 'Original bytes acquired' : 'Metadata acquired; bytes not retained', { receipt, acquisitionId, duplicate: family.duplicate, bytes: level === 'bytes' ? o.size as number : 0 });
+      await settleItem(tx, env, ctx, item, lvl, lvl === 'bytes' ? 'Original bytes acquired' : noArchive ? 'Metadata acquired; bytes not retained (robots noarchive)' : 'Metadata acquired; bytes not retained', { receipt, acquisitionId, duplicate: family.duplicate, bytes: lvl === 'bytes' ? o.size as number : 0 });
       await tx.query(`insert into ${S}.acquisitions (tenant_id, project_id, id, item_id, source_id, run_id, revision, level, sha256, size, media_type, storage, evidence_ref, object_key, family_id, reuse, access_terms, receipt_id, metadata, origin, changed, supersedes, compartment, acquired_at)
         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb,$20::jsonb,$21,$22,$23,$24)`,
-        [ctx.tenantId, ctx.projectId, acquisitionId, item.id, source.id, run.id, revision, level, sha256, o.size, mediaType, storage.kind, storage.evidenceRef ?? null, storage.objectKey ?? null, family.id, source.reuse, source.access_terms, receipt.id, JSON.stringify(meta), JSON.stringify(origin), prior !== undefined && prior.sha256 !== sha256, prior?.id ?? null, source.compartment, ctx.now]);
-      await tx.query(`update ${S}.items set current_acquisition=$2, family_id=$3, etag=$4, last_modified=$5, state=$6, title=coalesce($7, title), stale=false where id=$1`, [item.id, acquisitionId, family.id, o.headers.etag ?? null, o.headers['last-modified'] ?? null, level === 'bytes' ? 'bytes_acquired' : 'metadata_acquired', typeof meta.title === 'string' ? meta.title : null]);
+        [ctx.tenantId, ctx.projectId, acquisitionId, item.id, source.id, run.id, revision, lvl, sha256, o.size, mediaType, storage.kind, storage.evidenceRef ?? null, storage.objectKey ?? null, family.id, source.reuse, source.access_terms, receipt.id, JSON.stringify(meta), JSON.stringify(origin), prior !== undefined && prior.sha256 !== sha256, prior?.id ?? null, source.compartment, ctx.now]);
+      await tx.query(`update ${S}.items set current_acquisition=$2, family_id=$3, etag=$4, last_modified=$5, state=$6, title=coalesce($7, title), stale=false where id=$1`, [item.id, acquisitionId, family.id, o.headers.etag ?? null, o.headers['last-modified'] ?? null, lvl === 'bytes' ? 'bytes_acquired' : 'metadata_acquired', typeof meta.title === 'string' ? meta.title : null]);
       await resolve();
       const acqRef = ref('acquisition', acquisitionId, revision);
       if (leads.length > 0) await storeExtracted(tx, ctx, leads, { acquisitionRef: acqRef, itemRef, pageUrl: o.finalUrl, questionRef: run.question_ref ?? item.question_ref ?? null, why: run.options.extractLeads?.why ?? null, compartment: source.compartment });
-      await audit(tx, ctx, 'acquisition.recorded', acqRef, { item: itemRef, level, sha256, size: o.size, storage: storage.kind, reuse: source.reuse, receipt: ref('receipt', receipt.id) });
-      await emit(tx, ctx, 'acquisition.completed', acqRef, { item: itemRef, level, sha256, changed: prior !== undefined && prior.sha256 !== sha256, supersedes: prior === undefined ? null : ref('acquisition', prior.id, prior.revision), evidenceRef: storage.evidenceRef ?? null, duplicateOfExistingContent: family.duplicate, reuse: source.reuse });
+      await audit(tx, ctx, 'acquisition.recorded', acqRef, { item: itemRef, level: lvl, sha256, size: o.size, storage: storage.kind, reuse: source.reuse, receipt: ref('receipt', receipt.id) });
+      await emit(tx, ctx, 'acquisition.completed', acqRef, { item: itemRef, level: lvl, sha256, changed: prior !== undefined && prior.sha256 !== sha256, supersedes: prior === undefined ? null : ref('acquisition', prior.id, prior.revision), evidenceRef: storage.evidenceRef ?? null, duplicateOfExistingContent: family.duplicate, reuse: source.reuse });
     });
   }
 
@@ -758,6 +777,11 @@ export function createEngine(deps: DiscoveryDeps) {
       return;
     }
     if (c.cls !== 'ok') return drop(c.cls === 'restricted' ? 'access_restricted' : c.cls === 'not_found' ? 'not_found' : 'skipped_policy', c.gap ?? 'page_unavailable', c.detail, buildReceipt(env.ctx(), source, o, { ...base, ...(c.cls === 'restricted' ? { outcome: 'access_restricted' } : {}) }));
+    // Page-level robots: under the `honour` policy a `nofollow` (or `none`) index page is kept as a receipt but its links are not followed.
+    const pageRobots = directivesOf(o);
+    const noFollow = source.robots_policy === 'honour' && !pageRobots.follow;
+    base.robots = robotsWithPage(source, pf.robots, pageRobots, noFollow ? 'nofollow' : null);
+    if (noFollow) return drop('skipped_policy', 'robots_disallowed', `page carries a robots ${pageRobots.directives.includes('none') ? 'none' : 'nofollow'} directive (X-Robots-Tag or meta robots); its links were not followed`, buildReceipt(env.ctx(), source, o, { ...base, outcome: 'robots_nofollow' }));
     let listing: Listing;
     try { listing = parseListing(source, o); } catch { return drop('unparseable', 'unparseable_page', `page could not be parsed as ${source.kind}`, buildReceipt(env.ctx(), source, o, base)); }
     await sql.tx(async (tx) => {
