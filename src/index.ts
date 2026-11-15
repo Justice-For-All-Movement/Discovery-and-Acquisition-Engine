@@ -1,4 +1,5 @@
 import { request } from "node:https";
+import { performance } from "node:perf_hooks";
 import { resolve4 } from "node:dns/promises";
 import { isIP } from "node:net";
 import {
@@ -198,6 +199,7 @@ export async function capture(
   const abort = () => controller.abort();
   parentSignal?.addEventListener("abort", abort, { once: true });
   if (parentSignal?.aborted) abort();
+  const deadline = performance.now() + timeoutMs;
   const timer = setTimeout(() => {
     timedOut = true;
     abort();
@@ -210,8 +212,17 @@ export async function capture(
         : "Capture was cancelled",
     );
   }
-  async function bounded<T>(work: () => Promise<T>): Promise<T> {
+  // Timers cannot preempt synchronous adapter work. Recheck monotonic elapsed time
+  // at admission/result boundaries before starting another request or publishing bytes.
+  function checkDeadline(): void {
+    if (!controller.signal.aborted && performance.now() >= deadline) {
+      timedOut = true;
+      abort();
+    }
     if (controller.signal.aborted) throw interrupted();
+  }
+  async function bounded<T>(work: () => Promise<T>): Promise<T> {
+    checkDeadline();
     return new Promise<T>((resolve, reject) => {
       const cancelled = () => {
         cleanup();
@@ -222,24 +233,22 @@ export async function capture(
       controller.signal.addEventListener("abort", cancelled, { once: true });
       Promise.resolve()
         .then(() => {
-          if (controller.signal.aborted) throw interrupted();
+          checkDeadline();
           return work();
         })
         .then(
           (value) => {
             cleanup();
-            resolve(value);
+            try { checkDeadline(); resolve(value); }
+            catch (error) { reject(error); }
           },
           () => {
             cleanup();
-            reject(
-              controller.signal.aborted
-                ? interrupted()
-                : new DomainError(
-                    "capture_unavailable",
-                    "Capture transport or resolution could not complete",
-                  ),
-            );
+            try {
+              checkDeadline();
+              reject(new DomainError("capture_unavailable",
+                "Capture transport or resolution could not complete"));
+            } catch (error) { reject(error); }
           },
         );
     });
@@ -310,7 +319,7 @@ export async function capture(
         "unsupported_media",
         "Source content type is unsupported",
       );
-      return {
+      const result: Capture = {
         tenantId: ctx.tenantId,
         projectId: ctx.projectId,
         sourcePolicyId: policy.id,
@@ -325,6 +334,8 @@ export async function capture(
         etag: response.headers.etag ?? null,
         lastModified: response.headers["last-modified"] ?? null,
       };
+      checkDeadline();
+      return result;
     }
   } catch (error) {
     if (error instanceof DomainError) throw error;
